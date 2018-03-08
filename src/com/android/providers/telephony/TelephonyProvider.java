@@ -184,6 +184,13 @@ public class TelephonyProvider extends ContentProvider
     private static final String IS_NOT_CARRIER_DELETED_BUT_PRESENT_IN_XML =
             EDITED + "!=" + CARRIER_DELETED_BUT_PRESENT_IN_XML;
 
+    // Indicate whether the preset APN can be deleted
+    // The default value is false means user can delete it
+    private static final String PERSISTENT = "persistent";
+    // Indicate whether the preset APN can be modified
+    // The default value is false means user can modify it
+    private static final String READ_ONLY = "read_only";
+
     private static final int INVALID_APN_ID = -1;
     private static final List<String> CARRIERS_UNIQUE_FIELDS = new ArrayList<String>();
 
@@ -214,6 +221,7 @@ public class TelephonyProvider extends ContentProvider
         CARRIERS_UNIQUE_FIELDS.add(PROTOCOL);
         CARRIERS_UNIQUE_FIELDS.add(ROAMING_PROTOCOL);
         CARRIERS_UNIQUE_FIELDS.add(USER_EDITABLE);
+        CARRIERS_UNIQUE_FIELDS.add(TYPE);
     }
 
     @VisibleForTesting
@@ -254,6 +262,8 @@ public class TelephonyProvider extends ContentProvider
                 EDITED + " INTEGER DEFAULT " + UNEDITED + "," +
                 USER_VISIBLE + " BOOLEAN DEFAULT 1," +
                 USER_EDITABLE + " BOOLEAN DEFAULT 1," +
+                PERSISTENT + " BOOLEAN DEFAULT 0," +
+                READ_ONLY + " BOOLEAN DEFAULT 0," +
                 // Uniqueness collisions are used to trigger merge code so if a field is listed
                 // here it means we will accept both (user edited + new apn_conf definition)
                 // Columns not included in UNIQUE constraint: name, current, edited,
@@ -1310,6 +1320,8 @@ public class TelephonyProvider extends ContentProvider
             addBoolAttribute(parser, "modem_cognitive", map, MODEM_COGNITIVE);
             addBoolAttribute(parser, "user_visible", map, USER_VISIBLE);
             addBoolAttribute(parser, "user_editable", map, USER_EDITABLE);
+            addBoolAttribute(parser, "persistent", map, PERSISTENT);
+            addBoolAttribute(parser, "read_only", map, READ_ONLY);
 
             int bearerBitmask = 0;
             String bearerList = parser.getAttributeValue(null, "bearer_bitmask");
@@ -2603,9 +2615,38 @@ public class TelephonyProvider extends ContentProvider
 
     private void restoreDefaultAPN(int subId) {
         SQLiteDatabase db = getWritableDatabase();
+        TelephonyManager mTm =
+               (TelephonyManager) getContext().getSystemService(Context.TELEPHONY_SERVICE);
+        SubscriptionManager sm = SubscriptionManager.from(getContext());
+        String selSubOperatorNumeric = mTm.getSimOperator(subId);
+        String otherSubOperatorNumeric = null;
+        String where = null;
+        List<SubscriptionInfo> subInfoList = sm.getActiveSubscriptionInfoList();
+        int simCountWithSameNumeric = 0;
+        if (subInfoList != null && subInfoList.size() > 1) {
+            where = "not (";
+            for (SubscriptionInfo subInfo : subInfoList) {
+               if (subId != subInfo.getSubscriptionId()) {
+                  otherSubOperatorNumeric = mTm.getSimOperator(
+                          subInfo.getSubscriptionId());
+                  if (!otherSubOperatorNumeric.equalsIgnoreCase(selSubOperatorNumeric)) {
+                      where = where + "numeric=" + otherSubOperatorNumeric + " and ";
+                  } else {
+                      simCountWithSameNumeric++;
+                  }
+               }
+            }
+            where = where + "edited=" + USER_EDITED + ")";
+        }
+
+        if (subInfoList != null && simCountWithSameNumeric == subInfoList.size() - 1) {
+            //Reset where as all slots have same sims
+            where = null;
+        }
+        log("restoreDefaultAPN: where: " + where);
 
         try {
-            db.delete(CARRIERS_TABLE, null, null);
+            db.delete(CARRIERS_TABLE, where, null);
         } catch (SQLException e) {
             loge("got exception when deleting to restore: " + e);
         }
